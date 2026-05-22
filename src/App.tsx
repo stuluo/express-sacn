@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { Camera, Barcode, Wifi, WifiOff, Send, CheckCircle2, XCircle, Scale } from "lucide-react";
+import { Camera, Barcode, Wifi, WifiOff, Send, CheckCircle2, XCircle, Scale, Trash2, Clock } from "lucide-react";
 import { CameraScanner } from "./CameraScanner";
 
 interface ScanRecord {
@@ -68,7 +68,13 @@ export default function App() {
   }, []);
 
   const handleScan = (code: string) => {
-    setTrackingNo(code.trim());
+    const clean = code.trim();
+    // Check duplicate
+    if (records.some((r) => r.kddh === clean)) {
+      setFeedback({ type: "error", text: `单号 ${clean} 已存在，不能重复扫码` });
+      return;
+    }
+    setTrackingNo(clean);
     setWeight("");
     setFeedback(null);
     setTimeout(() => weightRef.current?.focus(), 150);
@@ -80,22 +86,37 @@ export default function App() {
     const kdzl = parseFloat(weight);
     if (!kddh) { setFeedback({ type: "error", text: "请先扫描快递单号" }); return; }
     if (isNaN(kdzl) || kdzl <= 0) { setFeedback({ type: "error", text: "请输入有效的快递重量" }); return; }
+    if (records.some((r) => r.kddh === kddh)) {
+      setFeedback({ type: "error", text: `单号 ${kddh} 已存在，不能重复添加` });
+      return;
+    }
 
     const record: ScanRecord = {
       id: Date.now().toString(),
       kddh,
-      kdzl,
+      kdzl: Math.round(kdzl * 100) / 100,
       time: new Date().toLocaleString("zh-CN"),
       synced: false,
     };
     setRecords((prev) => [record, ...prev]);
-    setFeedback({ type: "success", text: `已缓存：${kddh}，${kdzl}kg` });
+    setFeedback({ type: "success", text: `已缓存：${kddh}，${record.kdzl.toFixed(2)}kg` });
     setTrackingNo("");
     setWeight("");
     setTimeout(() => {
       const input = document.getElementById("barcode-input") as HTMLInputElement;
       input?.focus();
     }, 100);
+  };
+
+  const handleDeleteRecord = (id: string) => {
+    setRecords((prev) => prev.filter((r) => r.id !== id));
+  };
+
+  const handleClearAll = () => {
+    if (confirm("确认清空所有缓存和上传记录吗？")) {
+      setRecords([]);
+      localStorage.removeItem("express_scan_records");
+    }
   };
 
   // Batch submit all unsynced records
@@ -227,6 +248,7 @@ export default function App() {
                   type="number"
                   step="0.01"
                   min="0.01"
+                  inputMode="decimal"
                   placeholder="输入重量 (kg)"
                   value={weight}
                   onChange={(e) => setWeight(e.target.value)}
@@ -258,21 +280,42 @@ export default function App() {
         {/* Records History */}
         {records.length > 0 && (
           <div className="rounded-xl border border-zinc-200 bg-white p-4 shadow-sm">
-            <h2 className="text-xs font-bold tracking-wider text-zinc-400 uppercase mb-3">上传记录 ({records.length})</h2>
+            <div className="flex items-center justify-between mb-3">
+              <h2 className="text-xs font-bold tracking-wider text-zinc-400 uppercase">
+                缓存记录 ({records.length})
+              </h2>
+              <button
+                onClick={handleClearAll}
+                className="text-xs font-semibold text-rose-500 hover:text-rose-600 cursor-pointer"
+              >
+                清空全部
+              </button>
+            </div>
             <div className="max-h-64 overflow-y-auto space-y-1.5">
               {records.map((r) => (
-                <div key={r.id} className="flex items-center justify-between rounded-lg border border-zinc-150 bg-zinc-50 px-3 py-2 text-xs">
-                  <div>
+                <div key={r.id} className={`flex items-center justify-between rounded-lg border px-3 py-2 text-xs ${
+                  r.synced ? "bg-emerald-50/50 border-emerald-150" : "bg-amber-50/50 border-amber-150"
+                }`}>
+                  <div className="flex-1 min-w-0">
                     <span className="font-mono font-bold text-zinc-800">{r.kddh}</span>
-                    <span className="text-zinc-400 ml-2">{r.kdzl}kg</span>
+                    <span className="text-zinc-500 ml-2 font-mono">{r.kdzl.toFixed(2)}kg</span>
                   </div>
-                  <div className="flex items-center gap-2">
-                    <span className="text-zinc-400">{r.time}</span>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <span className="text-zinc-400 text-[10px] flex items-center gap-0.5">
+                      <Clock className="h-3 w-3" />{r.time}
+                    </span>
                     {r.synced ? (
-                      <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />
+                      <CheckCircle2 className="h-4 w-4 text-emerald-500" />
                     ) : (
-                      <XCircle className="h-3.5 w-3.5 text-rose-500" />
+                      <span className="inline-flex items-center rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700">待提交</span>
                     )}
+                    <button
+                      onClick={() => handleDeleteRecord(r.id)}
+                      className="text-zinc-300 hover:text-rose-500 p-0.5 cursor-pointer transition"
+                      title="删除"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
                   </div>
                 </div>
               ))}
