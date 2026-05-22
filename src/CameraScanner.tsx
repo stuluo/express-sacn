@@ -7,33 +7,16 @@ interface CameraScannerProps {
   onClose: () => void;
 }
 
-const isAndroid = /android/i.test(navigator.userAgent);
-
-// 1D-only formats for express tracking — much faster on Android
-const FORMATS_1D = [
+ // 纯1D条形码 — 快递单号/商品条码专用，速度快
+const BARCODE_FORMATS = [
   Html5QrcodeSupportedFormats.CODE_128,
   Html5QrcodeSupportedFormats.CODE_39,
   Html5QrcodeSupportedFormats.EAN_13,
   Html5QrcodeSupportedFormats.EAN_8,
-  Html5QrcodeSupportedFormats.UPC_A,
-  Html5QrcodeSupportedFormats.UPC_E,
-];
-
-// Full formats for iOS/desktop
-const FORMATS_ALL = [
-  Html5QrcodeSupportedFormats.QR_CODE,
-  Html5QrcodeSupportedFormats.EAN_13,
-  Html5QrcodeSupportedFormats.EAN_8,
-  Html5QrcodeSupportedFormats.CODE_128,
-  Html5QrcodeSupportedFormats.CODE_39,
-  Html5QrcodeSupportedFormats.CODE_93,
   Html5QrcodeSupportedFormats.UPC_A,
   Html5QrcodeSupportedFormats.UPC_E,
   Html5QrcodeSupportedFormats.ITF,
-  Html5QrcodeSupportedFormats.DATA_MATRIX,
   Html5QrcodeSupportedFormats.CODABAR,
-  Html5QrcodeSupportedFormats.AZTEC,
-  Html5QrcodeSupportedFormats.PDF_417,
 ];
 
 const BACK_CAMERA_KEYWORDS = [
@@ -116,39 +99,24 @@ export function CameraScanner({ onScanSuccess, onClose }: CameraScannerProps) {
           await qrCodeInstanceRef.current.stop();
         }
       } else {
-        // Android: 1D-only, no BarcodeDetector; iOS/web: full formats + native detector
         qrCodeInstanceRef.current = new Html5Qrcode(containerId, {
           verbose: false,
-          formatsToSupport: isAndroid ? FORMATS_1D : FORMATS_ALL,
-          useBarCodeDetectorIfSupported: !isAndroid,
+          formatsToSupport: BARCODE_FORMATS,
+          useBarCodeDetectorIfSupported: false,
         });
       }
 
       setIsScanning(true);
 
-      // Android: lower fps + wider scan box for 1D barcodes
-      // iOS/web: higher fps + square box for QR + 1D
-      const scanConfig = isAndroid
-        ? {
-            fps: 20,
-            qrbox: (width: number, _height: number) => ({
-              width: Math.min(Math.floor(width * 0.85), 320),
-              height: Math.min(Math.floor(width * 0.22), 90),
-            }),
-            aspectRatio: 1.777,
-          }
-        : {
-            fps: 30,
-            qrbox: (width: number, height: number) => {
-              const minDim = Math.min(width, height);
-              const boxSize = Math.min(Math.floor(minDim * 0.78), 280);
-              return { width: boxSize, height: boxSize };
-            },
-            aspectRatio: 1.333333,
-            experimentalFeatures: {
-              useBarCodeDetectorIfSupported: true,
-            },
-          };
+      // 1D条形码专用配置：宽矩形扫描框 + 适中FPS
+      const scanConfig = {
+        fps: 20,
+        qrbox: (width: number, _height: number) => ({
+          width: Math.min(Math.floor(width * 0.85), 320),
+          height: Math.min(Math.floor(width * 0.20), 80),
+        }),
+        aspectRatio: 1.777,
+      };
 
       await qrCodeInstanceRef.current.start(
         cameraId,
@@ -212,9 +180,7 @@ export function CameraScanner({ onScanSuccess, onClose }: CameraScannerProps) {
           </div>
           <div>
             <h3 className="font-sans text-sm font-semibold text-zinc-100">扫码器</h3>
-            <p className="font-mono text-[10px] text-zinc-400">
-              {isAndroid ? "1D条形码 · 安卓优化" : "条形码 / 二维码"}
-            </p>
+            <p className="font-mono text-[10px] text-zinc-400">1D 条形码</p>
           </div>
         </div>
 
@@ -274,11 +240,7 @@ export function CameraScanner({ onScanSuccess, onClose }: CameraScannerProps) {
 
               {isScanning && (
                 <div className="pointer-events-none absolute inset-0 z-10 flex flex-col items-center justify-center">
-                  <div
-                    className={`relative border-2 border-dashed border-emerald-500/80 bg-transparent ${
-                      isAndroid ? "w-[280px] h-[70px]" : "w-[250px] h-[250px]"
-                    }`}
-                  >
+                  <div className="relative border-2 border-dashed border-emerald-500/80 bg-transparent w-[280px] h-[70px]">
                     <div
                       className="absolute left-0 w-full h-[2px] bg-emerald-400 shadow-[0_0_8px_#34d399]"
                       style={{ animation: "scanner-line 2s ease-in-out infinite" }}
@@ -296,7 +258,7 @@ export function CameraScanner({ onScanSuccess, onClose }: CameraScannerProps) {
             </div>
 
             <div className="mt-4 text-center text-xs text-zinc-500">
-              {isAndroid ? "安卓优化模式 · 仅1D条形码" : "支持 EAN/UPC/Code128/QR/DataMatrix 等常见码制"}
+              Code128 / Code39 / EAN / UPC / ITF / Codabar
             </div>
           </div>
         )}
