@@ -74,46 +74,62 @@ export default function App() {
     setTimeout(() => weightRef.current?.focus(), 150);
   };
 
-  const handleSubmit = async () => {
+  // Add to local cache only, no API call
+  const handleAdd = () => {
     const kddh = trackingNo.trim();
     const kdzl = parseFloat(weight);
     if (!kddh) { setFeedback({ type: "error", text: "请先扫描快递单号" }); return; }
     if (isNaN(kdzl) || kdzl <= 0) { setFeedback({ type: "error", text: "请输入有效的快递重量" }); return; }
 
+    const record: ScanRecord = {
+      id: Date.now().toString(),
+      kddh,
+      kdzl,
+      time: new Date().toLocaleString("zh-CN"),
+      synced: false,
+    };
+    setRecords((prev) => [record, ...prev]);
+    setFeedback({ type: "success", text: `已缓存：${kddh}，${kdzl}kg` });
+    setTrackingNo("");
+    setWeight("");
+    setTimeout(() => {
+      const input = document.getElementById("barcode-input") as HTMLInputElement;
+      input?.focus();
+    }, 100);
+  };
+
+  // Batch submit all unsynced records
+  const handleBatchSubmit = async () => {
+    const pending = records.filter((r) => !r.synced);
+    if (pending.length === 0) { setFeedback({ type: "error", text: "没有待提交的缓存记录" }); return; }
+
     setBusy(true);
     setFeedback(null);
-    try {
-      const res = await fetch("/api/nocobase/kdcz:create", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ kddh, kdzl }),
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const json = await res.json();
 
-      const record: ScanRecord = {
-        id: json.data?.id ?? Date.now().toString(),
-        kddh,
-        kdzl,
-        time: new Date().toLocaleString("zh-CN"),
-        synced: true,
-      };
-      setRecords((prev) => [record, ...prev]);
-      setFeedback({ type: "success", text: `已上传：${kddh}，${kdzl}kg` });
-      setTrackingNo("");
-      setWeight("");
-    } catch (err: any) {
-      setFeedback({ type: "error", text: `上传失败: ${err.message}` });
-      const record: ScanRecord = {
-        id: Date.now().toString(),
-        kddh, kdzl,
-        time: new Date().toLocaleString("zh-CN"),
-        synced: false,
-      };
-      setRecords((prev) => [record, ...prev]);
-    } finally {
-      setBusy(false);
+    let ok = 0;
+    let fail = 0;
+
+    for (const r of pending) {
+      try {
+        const res = await fetch("/api/nocobase/kdcz:create", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ kddh: r.kddh, kdzl: r.kdzl }),
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        setRecords((prev) => prev.map((p) => p.id === r.id ? { ...p, synced: true } : p));
+        ok++;
+      } catch {
+        fail++;
+      }
     }
+
+    if (fail === 0) {
+      setFeedback({ type: "success", text: `全部提交成功，共 ${ok} 条` });
+    } else {
+      setFeedback({ type: "error", text: `提交完成：${ok} 成功，${fail} 失败` });
+    }
+    setBusy(false);
   };
 
   return (
@@ -145,6 +161,7 @@ export default function App() {
             <div className="relative flex-1">
               <Barcode className="absolute left-3 top-3 h-4 w-4 text-zinc-400" />
               <input
+                id="barcode-input"
                 type="text"
                 placeholder="扫描或手动输入快递单号"
                 value={trackingNo}
@@ -168,7 +185,34 @@ export default function App() {
           </button>
         </div>
 
-        {/* Weight Input + Submit */}
+        {/* Batch submit bar */}
+        {(() => {
+          const pendingCount = records.filter((r) => !r.synced).length;
+          if (pendingCount === 0 && records.length === 0) return null;
+          return (
+            <div className="rounded-xl border border-zinc-200 bg-white p-4 shadow-sm">
+              <div className="flex items-center justify-between">
+                <div className="text-xs">
+                  <span className="text-zinc-400">缓存：</span>
+                  <span className="font-bold text-indigo-600">{pendingCount} 条待提交</span>
+                  {records.length > pendingCount && (
+                    <span className="text-zinc-400 ml-2">/ {records.length - pendingCount} 条已提交</span>
+                  )}
+                </div>
+                <button
+                  onClick={handleBatchSubmit}
+                  disabled={busy || pendingCount === 0}
+                  className="flex items-center gap-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 disabled:opacity-40 text-white font-bold text-xs px-4 py-2.5 transition cursor-pointer active:scale-95"
+                >
+                  <Send className="h-3.5 w-3.5" />
+                  {busy ? "提交中..." : `全部提交 (${pendingCount})`}
+                </button>
+              </div>
+            </div>
+          );
+        })()}
+
+        {/* Weight Input + Add to cache */}
         {trackingNo && (
           <div className="rounded-xl border border-zinc-200 bg-white p-4 shadow-sm">
             <h2 className="text-xs font-bold tracking-wider text-zinc-400 uppercase mb-3">录入重量</h2>
@@ -186,18 +230,16 @@ export default function App() {
                   placeholder="输入重量 (kg)"
                   value={weight}
                   onChange={(e) => setWeight(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); handleSubmit(); } }}
+                  onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); handleAdd(); } }}
                   className="w-full rounded-lg border border-zinc-200 bg-white pl-10 pr-4 py-3 font-mono text-xl font-black text-zinc-800 text-center focus:outline-none focus:ring-2 focus:ring-indigo-500"
                   autoFocus
                 />
               </div>
               <button
-                onClick={handleSubmit}
-                disabled={busy}
-                className="w-full flex items-center justify-center gap-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 disabled:opacity-40 text-white font-bold text-sm py-3 transition cursor-pointer active:scale-95"
+                onClick={handleAdd}
+                className="w-full flex items-center justify-center gap-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-sm py-3 transition cursor-pointer active:scale-95"
               >
-                <Send className="h-4 w-4" />
-                {busy ? "提交中..." : "确认上传"}
+                添加到缓存
               </button>
             </div>
           </div>
