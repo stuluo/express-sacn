@@ -1,5 +1,4 @@
-import { useEffect, useRef, useState } from "react";
-import { Html5Qrcode, Html5QrcodeSupportedFormats } from "html5-qrcode";
+import { useEffect, useRef, useState, useCallback } from "react";
 import { Camera, RefreshCw, AlertTriangle, Volume2, VolumeX } from "lucide-react";
 
 interface CameraScannerProps {
@@ -7,26 +6,20 @@ interface CameraScannerProps {
   onClose: () => void;
 }
 
-const SCAN_FORMATS = [
-  Html5QrcodeSupportedFormats.CODE_128,
-  Html5QrcodeSupportedFormats.CODE_39,
-  Html5QrcodeSupportedFormats.EAN_13,
-  Html5QrcodeSupportedFormats.EAN_8,
-  Html5QrcodeSupportedFormats.UPC_A,
-  Html5QrcodeSupportedFormats.UPC_E,
-  Html5QrcodeSupportedFormats.ITF,
-  Html5QrcodeSupportedFormats.CODABAR,
-];
-
 export function CameraScanner({ onScanSuccess, onClose }: CameraScannerProps) {
   const [error, setError] = useState<string | null>(null);
   const [scanning, setScanning] = useState(false);
   const [facingMode, setFacingMode] = useState<"environment" | "user">("environment");
   const [soundEnabled, setSoundEnabled] = useState(true);
+  const [supportedFormats, setSupportedFormats] = useState<string[]>([]);
 
-  const scannerRef = useRef<Html5Qrcode | null>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const rafRef = useRef<number>(0);
   const detectedRef = useRef(false);
-  const scannerDivId = useRef(`scanner-${Math.random().toString(36).slice(2, 10)}`).current;
+  const detectorRef = useRef<BarcodeDetector | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const scanningRef = useRef(false);
 
   const playScanBeep = () => {
     if (!soundEnabled) return;
@@ -45,71 +38,126 @@ export function CameraScanner({ onScanSuccess, onClose }: CameraScannerProps) {
     } catch {}
   };
 
-  const stopScanner = async () => {
-    if (scannerRef.current) {
-      try { await scannerRef.current.stop(); } catch {}
-      try { scannerRef.current.clear(); } catch {}
-      scannerRef.current = null;
+  const stopStream = useCallback(() => {
+    scanningRef.current = false;
+    if (rafRef.current) {
+      cancelAnimationFrame(rafRef.current);
+      rafRef.current = 0;
+    }
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((t) => t.stop());
+      streamRef.current = null;
     }
     setScanning(false);
-  };
+  }, []);
 
-  const startScanner = async (mode: "environment" | "user") => {
+  const scanLoop = useCallback(() => {
+    const video = videoRef.current;
+    const detector = detectorRef.current;
+    const canvas = canvasRef.current;
+    if (!video || !detector || !canvas) {
+      if (scanningRef.current) {
+        rafRef.current = requestAnimationFrame(scanLoop);
+      }
+      return;
+    }
+
+    if (video.readyState < 2) {
+      rafRef.current = requestAnimationFrame(scanLoop);
+      return;
+    }
+
+    // Capture frame to canvas
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    if (ctx) {
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    }
+
+    detector.detect(canvas).then((barcodes) => {
+      if (barcodes.length > 0 && !detectedRef.current) {
+        detectedRef.current = true;
+        playScanBeep();
+        stopStream();
+        onScanSuccess(barcodes[0].rawValue);
+        return;
+      }
+    }).catch(() => {}).finally(() => {
+      if (scanningRef.current) {
+        rafRef.current = requestAnimationFrame(scanLoop);
+      }
+    });
+  }, [onScanSuccess, stopStream]);
+
+  const startCamera = useCallback(async (mode: "environment" | "user") => {
     setError(null);
     detectedRef.current = false;
-    await stopScanner();
+    stopStream();
 
-    const scanner = new Html5Qrcode(scannerDivId, {
-      verbose: false,
-      formatsToSupport: SCAN_FORMATS,
-      useBarCodeDetectorIfSupported: false,
-    });
-    scannerRef.current = scanner;
+    if (!window.BarcodeDetector) {
+      setError("此浏览器不支持 BarcodeDetector API。请使用 Chrome 或 Edge 浏览器。");
+      return;
+    }
 
     try {
-      await scanner.start(
-        { facingMode: mode },
-        {
-          fps: 10,
-          qrbox: { width: 280, height: 100 },
-          aspectRatio: 1.333,
-        },
-        (decodedText: string) => {
-          if (detectedRef.current) return;
-          detectedRef.current = true;
-          playScanBeep();
-          onScanSuccess(decodedText);
-        },
-        () => {
-          // 每帧未识别时回调，静默忽略
-        }
-      );
+      const supported = await BarcodeDetector.getSupportedFormats();
+      if (supported.length === 0) {
+        setError("浏览器不支持任何条码格式检测。");
+        return;
+      }
+      setSupportedFormats(supported as string[]);
+      detectorRef.current = new BarcodeDetector({ formats: supported as BarcodeFormat[] });
+    } catch {
+      setError("初始化条码检测器失败。");
+      return;
+    }
+
+    // Create offscreen canvas for frame capture
+    canvasRef.current = document.createElement("canvas");
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: mode, width: { ideal: 1280 }, height: { ideal: 720 } },
+        audio: false,
+      });
+      streamRef.current = stream;
+
+      // Attach to visible video element
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        await videoRef.current.play();
+      }
+
+      scanningRef.current = true;
       setScanning(true);
+      rafRef.current = requestAnimationFrame(scanLoop);
     } catch (err: any) {
       const msg = err?.message || err?.toString() || "";
       if (msg.includes("NotAllowed") || msg.includes("Permission")) {
-        setError("摄像头权限被拒绝，请在浏览器设置中允许摄像头访问后刷新。");
+        setError("摄像头权限被拒绝，请在浏览器设置中允许摄像头访问。");
       } else if (msg.includes("NotFound") || msg.includes("No available")) {
         setError("未找到可用摄像头设备。");
       } else {
         setError(`摄像头启动失败: ${msg}`);
       }
     }
-  };
+  }, [scanLoop, stopStream]);
 
   const switchCamera = () => {
     const newMode = facingMode === "environment" ? "user" : "environment";
     setFacingMode(newMode);
     detectedRef.current = false;
-    stopScanner().then(() => {
-      setTimeout(() => startScanner(newMode), 200);
-    });
+    stopStream();
+    setTimeout(() => startCamera(newMode), 300);
   };
 
   useEffect(() => {
-    startScanner(facingMode);
-    return () => { stopScanner(); };
-  }, []);
+    startCamera(facingMode);
+    return () => { stopStream(); };
+  }, [facingMode, startCamera, stopStream]);
+
+  const formatLabel = supportedFormats.length > 0 ? supportedFormats.join(" / ") : "加载中...";
 
   return (
     <div className="fixed inset-0 z-50 flex flex-col bg-zinc-950 text-white">
@@ -121,9 +169,7 @@ export function CameraScanner({ onScanSuccess, onClose }: CameraScannerProps) {
           </div>
           <div>
             <h3 className="font-sans text-sm font-semibold text-zinc-100">扫码器</h3>
-            <p className="font-mono text-[10px] text-zinc-400">
-              1D 条形码 · ZXing 纯JS
-            </p>
+            <p className="font-mono text-[10px] text-zinc-400">原生 BarcodeDetector</p>
           </div>
         </div>
         <div className="flex items-center space-x-2">
@@ -137,7 +183,7 @@ export function CameraScanner({ onScanSuccess, onClose }: CameraScannerProps) {
           >
             {soundEnabled ? <Volume2 className="h-4 w-4" /> : <VolumeX className="h-4 w-4" />}
           </button>
-          <button onClick={() => { stopScanner(); onClose(); }} className="rounded-lg bg-zinc-800 px-3 py-1.5 text-xs font-semibold text-zinc-300 hover:bg-zinc-700">
+          <button onClick={() => { stopStream(); onClose(); }} className="rounded-lg bg-zinc-800 px-3 py-1.5 text-xs font-semibold text-zinc-300 hover:bg-zinc-700">
             返回
           </button>
         </div>
@@ -156,8 +202,15 @@ export function CameraScanner({ onScanSuccess, onClose }: CameraScannerProps) {
           </div>
         ) : (
           <>
-            <div className="relative w-full max-w-md aspect-[4/3] overflow-hidden">
-              <div id={scannerDivId} className="absolute inset-0 w-full h-full" />
+            <div className="relative w-full max-w-md aspect-[4/3] overflow-hidden bg-zinc-800">
+              <video
+                ref={videoRef}
+                autoPlay
+                playsInline
+                muted
+                className="absolute inset-0 w-full h-full object-cover"
+                style={{ transform: facingMode === "user" ? "scaleX(-1)" : "none" }}
+              />
 
               {scanning && (
                 <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center">
@@ -176,7 +229,7 @@ export function CameraScanner({ onScanSuccess, onClose }: CameraScannerProps) {
             </div>
 
             <div className="mt-3 text-center text-xs text-zinc-500">
-              Code128 / Code39 / EAN / UPC / ITF / Codabar
+              {formatLabel}
             </div>
           </>
         )}
@@ -186,7 +239,7 @@ export function CameraScanner({ onScanSuccess, onClose }: CameraScannerProps) {
       <div className="border-t border-zinc-800 bg-zinc-900 p-4">
         <div className="mx-auto flex max-w-sm items-center justify-between rounded-lg bg-zinc-800 px-3 py-2">
           <span className="text-[11px] text-zinc-400">引擎</span>
-          <span className="text-xs font-semibold text-emerald-400">ZXing (纯JS)</span>
+          <span className="text-xs font-semibold text-emerald-400">Native BarcodeDetector</span>
         </div>
       </div>
 
