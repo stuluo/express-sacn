@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Camera, RefreshCw, AlertTriangle, Volume2, VolumeX } from "lucide-react";
 import { Html5Qrcode, Html5QrcodeSupportedFormats } from "html5-qrcode";
 
@@ -26,9 +26,9 @@ export function CameraScanner({ onScanSuccess, onClose }: CameraScannerProps) {
 
   const scannerRef = useRef<Html5Qrcode | null>(null);
   const detectedRef = useRef(false);
-  const scannerDivRef = useRef(`scanner-${Date.now()}`);
+  const scannerDivId = useRef(`scanner-${Math.random().toString(36).slice(2, 10)}`).current;
 
-  const playScanBeep = useCallback(() => {
+  const playScanBeep = () => {
     if (!soundEnabled) return;
     try {
       const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
@@ -43,42 +43,57 @@ export function CameraScanner({ onScanSuccess, onClose }: CameraScannerProps) {
       oscillator.start();
       oscillator.stop(audioCtx.currentTime + 0.15);
     } catch {}
-  }, [soundEnabled]);
+  };
 
-  const stopScanner = useCallback(async () => {
-    detectedRef.current = false;
+  const stopScanner = async () => {
     if (scannerRef.current) {
-      try {
-        await scannerRef.current.stop();
-      } catch {}
-      try {
-        scannerRef.current.clear();
-      } catch {}
+      try { await scannerRef.current.stop(); } catch {}
+      try { scannerRef.current.clear(); } catch {}
       scannerRef.current = null;
     }
     setScanning(false);
-  }, []);
+  };
 
-  const startScanner = useCallback(async (mode: "environment" | "user") => {
+  const startScanner = async (mode: "environment" | "user") => {
     setError(null);
     detectedRef.current = false;
     await stopScanner();
 
-    // Small delay for DOM to settle
-    await new Promise((r) => setTimeout(r, 200));
-
-    const div = document.getElementById(scannerDivRef.current);
-    if (!div) return;
-
-    const scanner = new Html5Qrcode(scannerDivRef.current, {
+    const scanner = new Html5Qrcode(scannerDivId, {
       verbose: false,
       formatsToSupport: SCAN_FORMATS,
-      experimentalFeatures: {
-        useBarCodeDetectorIfSupported: true,
-      },
     });
     scannerRef.current = scanner;
 
+    // Try facingMode first (works on most devices)
+    try {
+      await scanner.start(
+        { facingMode: mode },
+        {
+          fps: 10,
+          qrbox: { width: 280, height: 100 },
+          aspectRatio: 1.333,
+        },
+        (decodedText: string) => {
+          if (detectedRef.current) return;
+          detectedRef.current = true;
+          playScanBeep();
+          onScanSuccess(decodedText);
+        },
+        () => {}
+      );
+      setScanning(true);
+      return;
+    } catch (err: any) {
+      // If facingMode fails, try enumerating cameras by deviceId
+      const msg = err?.message || err?.toString() || "";
+      if (msg.includes("NotAllowed") || msg.includes("Permission")) {
+        setError("摄像头权限被拒绝，请在浏览器设置中允许摄像头访问后刷新。");
+        return;
+      }
+    }
+
+    // Fallback: enumerate cameras and pick by deviceId
     try {
       const devices = await Html5Qrcode.getCameras();
       if (!devices || devices.length === 0) {
@@ -86,7 +101,6 @@ export function CameraScanner({ onScanSuccess, onClose }: CameraScannerProps) {
         return;
       }
 
-      // Pick the back camera
       let deviceId: string;
       if (mode === "environment") {
         const back = devices.find(
@@ -104,7 +118,7 @@ export function CameraScanner({ onScanSuccess, onClose }: CameraScannerProps) {
             d.label.toLowerCase().includes("user") ||
             d.label.toLowerCase().includes("前")
         );
-        deviceId = front ? front.id : devices[0].id;
+        deviceId = front ? front.id : devices[devices.length - 1].id;
       }
 
       await scanner.start(
@@ -118,36 +132,35 @@ export function CameraScanner({ onScanSuccess, onClose }: CameraScannerProps) {
           if (detectedRef.current) return;
           detectedRef.current = true;
           playScanBeep();
-          stopScanner().then(() => onScanSuccess(decodedText));
+          onScanSuccess(decodedText);
         },
-        () => {
-          // Silent ignore for no-barcode frames
-        }
+        () => {}
       );
       setScanning(true);
     } catch (err: any) {
       const msg = err?.message || err?.toString() || "";
       if (msg.includes("NotAllowed") || msg.includes("Permission")) {
-        setError("摄像头权限被拒绝，请在浏览器设置中允许摄像头访问。");
+        setError("摄像头权限被拒绝，请在浏览器设置中允许摄像头访问后刷新。");
       } else if (msg.includes("NotFound") || msg.includes("No available")) {
         setError("未找到可用摄像头设备。");
       } else {
         setError(`摄像头启动失败: ${msg}`);
       }
     }
-  }, [mode, playScanBeep, stopScanner, onScanSuccess]);
+  };
 
-  const switchCamera = useCallback(() => {
+  const switchCamera = () => {
     const newMode = facingMode === "environment" ? "user" : "environment";
     setFacingMode(newMode);
-    startScanner(newMode);
-  }, [facingMode, startScanner]);
+    detectedRef.current = false;
+    stopScanner().then(() => {
+      setTimeout(() => startScanner(newMode), 200);
+    });
+  };
 
   useEffect(() => {
     startScanner(facingMode);
-    return () => {
-      stopScanner();
-    };
+    return () => { stopScanner(); };
   }, []);
 
   return (
@@ -161,7 +174,7 @@ export function CameraScanner({ onScanSuccess, onClose }: CameraScannerProps) {
           <div>
             <h3 className="font-sans text-sm font-semibold text-zinc-100">扫码器</h3>
             <p className="font-mono text-[10px] text-zinc-400">
-              1D 条形码 · 多引擎融合
+              1D 条形码 · ZXing 纯JS
             </p>
           </div>
         </div>
@@ -195,8 +208,8 @@ export function CameraScanner({ onScanSuccess, onClose }: CameraScannerProps) {
           </div>
         ) : (
           <>
-            <div className="relative w-full max-w-md aspect-[4/3] overflow-hidden bg-zinc-800">
-              <div id={scannerDivRef.current} className="absolute inset-0 w-full h-full" />
+            <div className="relative w-full max-w-md aspect-[4/3] overflow-hidden">
+              <div id={scannerDivId} className="absolute inset-0 w-full h-full" />
 
               {scanning && (
                 <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center">
@@ -225,7 +238,7 @@ export function CameraScanner({ onScanSuccess, onClose }: CameraScannerProps) {
       <div className="border-t border-zinc-800 bg-zinc-900 p-4">
         <div className="mx-auto flex max-w-sm items-center justify-between rounded-lg bg-zinc-800 px-3 py-2">
           <span className="text-[11px] text-zinc-400">引擎</span>
-          <span className="text-xs font-semibold text-emerald-400">ZXing (融合)</span>
+          <span className="text-xs font-semibold text-emerald-400">ZXing (纯JS)</span>
         </div>
       </div>
 
@@ -233,17 +246,6 @@ export function CameraScanner({ onScanSuccess, onClose }: CameraScannerProps) {
         @keyframes scan-line {
           0%, 100% { top: 0%; }
           50% { top: 97%; }
-        }
-        /* Override html5-qrcode styles to remove debug panel */
-        #${scannerDivRef.current} video {
-          object-fit: cover !important;
-          width: 100% !important;
-          height: 100% !important;
-        }
-        #${scannerDivRef.current} canvas {
-          object-fit: cover !important;
-          width: 100% !important;
-          height: 100% !important;
         }
       `}</style>
     </div>
