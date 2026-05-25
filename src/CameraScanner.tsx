@@ -1,23 +1,22 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { Camera, RefreshCw, AlertTriangle, Volume2, VolumeX } from "lucide-react";
-import Quagga, { Result } from "@ericblade/quagga2";
+import { Html5Qrcode, Html5QrcodeSupportedFormats } from "html5-qrcode";
 
 interface CameraScannerProps {
   onScanSuccess: (barcode: string) => void;
   onClose: () => void;
 }
 
-const BARCODE_READERS = [
-  "code_128_reader",
-  "ean_reader",
-  "ean_8_reader",
-  "code_39_reader",
-  "code_39_vin_reader",
-  "upc_reader",
-  "upc_e_reader",
-  "codabar_reader",
-  "i2of5_reader",
-] as const;
+const SCAN_FORMATS = [
+  Html5QrcodeSupportedFormats.CODE_128,
+  Html5QrcodeSupportedFormats.CODE_39,
+  Html5QrcodeSupportedFormats.EAN_13,
+  Html5QrcodeSupportedFormats.EAN_8,
+  Html5QrcodeSupportedFormats.UPC_A,
+  Html5QrcodeSupportedFormats.UPC_E,
+  Html5QrcodeSupportedFormats.ITF,
+  Html5QrcodeSupportedFormats.CODABAR,
+];
 
 export function CameraScanner({ onScanSuccess, onClose }: CameraScannerProps) {
   const [error, setError] = useState<string | null>(null);
@@ -25,9 +24,9 @@ export function CameraScanner({ onScanSuccess, onClose }: CameraScannerProps) {
   const [facingMode, setFacingMode] = useState<"environment" | "user">("environment");
   const [soundEnabled, setSoundEnabled] = useState(true);
 
-  const containerRef = useRef<HTMLDivElement>(null);
+  const scannerRef = useRef<Html5Qrcode | null>(null);
   const detectedRef = useRef(false);
-  const quaggaStarted = useRef(false);
+  const scannerDivRef = useRef(`scanner-${Date.now()}`);
 
   const playScanBeep = useCallback(() => {
     if (!soundEnabled) return;
@@ -46,102 +45,110 @@ export function CameraScanner({ onScanSuccess, onClose }: CameraScannerProps) {
     } catch {}
   }, [soundEnabled]);
 
-  const stopQuagga = useCallback(() => {
-    quaggaStarted.current = false;
+  const stopScanner = useCallback(async () => {
     detectedRef.current = false;
-    Quagga.stop();
+    if (scannerRef.current) {
+      try {
+        await scannerRef.current.stop();
+      } catch {}
+      try {
+        scannerRef.current.clear();
+      } catch {}
+      scannerRef.current = null;
+    }
     setScanning(false);
   }, []);
 
-  const startQuagga = useCallback(async (mode: "environment" | "user") => {
+  const startScanner = useCallback(async (mode: "environment" | "user") => {
     setError(null);
-    stopQuagga();
+    detectedRef.current = false;
+    await stopScanner();
 
-    if (!containerRef.current) return;
+    // Small delay for DOM to settle
+    await new Promise((r) => setTimeout(r, 200));
 
-    // Clear previous canvas
-    containerRef.current.innerHTML = "";
+    const div = document.getElementById(scannerDivRef.current);
+    if (!div) return;
 
-    // Small delay for DOM cleanup
-    await new Promise((r) => setTimeout(r, 100));
+    const scanner = new Html5Qrcode(scannerDivRef.current, {
+      verbose: false,
+      formatsToSupport: SCAN_FORMATS,
+      experimentalFeatures: {
+        useBarCodeDetectorIfSupported: true,
+      },
+    });
+    scannerRef.current = scanner;
 
     try {
-      Quagga.init(
+      const devices = await Html5Qrcode.getCameras();
+      if (!devices || devices.length === 0) {
+        setError("未找到可用摄像头设备。");
+        return;
+      }
+
+      // Pick the back camera
+      let deviceId: string;
+      if (mode === "environment") {
+        const back = devices.find(
+          (d) =>
+            d.label.toLowerCase().includes("back") ||
+            d.label.toLowerCase().includes("rear") ||
+            d.label.toLowerCase().includes("环境") ||
+            d.label.toLowerCase().includes("后")
+        );
+        deviceId = back ? back.id : devices[0].id;
+      } else {
+        const front = devices.find(
+          (d) =>
+            d.label.toLowerCase().includes("front") ||
+            d.label.toLowerCase().includes("user") ||
+            d.label.toLowerCase().includes("前")
+        );
+        deviceId = front ? front.id : devices[0].id;
+      }
+
+      await scanner.start(
+        deviceId,
         {
-          inputStream: {
-            name: "Live",
-            type: "LiveStream",
-            target: containerRef.current,
-            constraints: {
-              facingMode: mode,
-              width: { ideal: 1280 },
-              height: { ideal: 720 },
-            },
-          },
-          decoder: {
-            readers: BARCODE_READERS as unknown as string[],
-            debug: {
-              showCanvas: false,
-              showPatches: false,
-              showFoundPatches: false,
-              showSkeleton: false,
-              showLabels: false,
-              showPatchLabels: false,
-              showRemainingPatchLabels: false,
-              boxFromPatches: { showTransformedBox: false },
-            },
-          },
-          locate: true,
-          numOfWorkers: navigator.hardwareConcurrency || 2,
-          frequency: 10,
+          fps: 10,
+          qrbox: { width: 280, height: 100 },
+          aspectRatio: 1.333,
         },
-        (err: Error | null) => {
-          if (err) {
-            const msg = err.message || err.toString() || "";
-            if (msg.includes("NotAllowed") || msg.includes("Permission")) {
-              setError("摄像头权限被拒绝，请在浏览器设置中允许摄像头访问。");
-            } else if (msg.includes("NotFound") || msg.includes("No available")) {
-              setError("未找到可用摄像头设备。");
-            } else {
-              setError(`扫码器启动失败: ${msg}`);
-            }
-            return;
-          }
-
-          quaggaStarted.current = true;
-          setScanning(true);
-
-          // Also try barcodeDetector as a fast path if available
-          Quagga.start();
-        }
-      );
-
-      Quagga.onDetected((result: Result) => {
-        const code = result.codeResult?.code;
-        if (code && !detectedRef.current) {
+        (decodedText: string) => {
+          if (detectedRef.current) return;
           detectedRef.current = true;
           playScanBeep();
-          stopQuagga();
-          onScanSuccess(code);
+          stopScanner().then(() => onScanSuccess(decodedText));
+        },
+        () => {
+          // Silent ignore for no-barcode frames
         }
-      });
+      );
+      setScanning(true);
     } catch (err: any) {
       const msg = err?.message || err?.toString() || "";
-      setError(`扫码器启动失败: ${msg}`);
+      if (msg.includes("NotAllowed") || msg.includes("Permission")) {
+        setError("摄像头权限被拒绝，请在浏览器设置中允许摄像头访问。");
+      } else if (msg.includes("NotFound") || msg.includes("No available")) {
+        setError("未找到可用摄像头设备。");
+      } else {
+        setError(`摄像头启动失败: ${msg}`);
+      }
     }
-  }, [onScanSuccess, playScanBeep, stopQuagga]);
+  }, [mode, playScanBeep, stopScanner, onScanSuccess]);
 
   const switchCamera = useCallback(() => {
     const newMode = facingMode === "environment" ? "user" : "environment";
     setFacingMode(newMode);
-    detectedRef.current = false;
-    startQuagga(newMode);
-  }, [facingMode, startQuagga]);
+    startScanner(newMode);
+  }, [facingMode, startScanner]);
 
   useEffect(() => {
-    startQuagga(facingMode);
-    return () => { stopQuagga(); };
-  }, [facingMode, startQuagga, stopQuagga]);
+    startScanner(facingMode);
+    return () => {
+      stopScanner();
+    };
+  }, []);
 
   return (
     <div className="fixed inset-0 z-50 flex flex-col bg-zinc-950 text-white">
@@ -153,7 +160,9 @@ export function CameraScanner({ onScanSuccess, onClose }: CameraScannerProps) {
           </div>
           <div>
             <h3 className="font-sans text-sm font-semibold text-zinc-100">扫码器</h3>
-            <p className="font-mono text-[10px] text-zinc-400">Quagga2 多引擎 · Worker 加速</p>
+            <p className="font-mono text-[10px] text-zinc-400">
+              1D 条形码 · 多引擎融合
+            </p>
           </div>
         </div>
         <div className="flex items-center space-x-2">
@@ -167,7 +176,7 @@ export function CameraScanner({ onScanSuccess, onClose }: CameraScannerProps) {
           >
             {soundEnabled ? <Volume2 className="h-4 w-4" /> : <VolumeX className="h-4 w-4" />}
           </button>
-          <button onClick={() => { stopQuagga(); onClose(); }} className="rounded-lg bg-zinc-800 px-3 py-1.5 text-xs font-semibold text-zinc-300 hover:bg-zinc-700">
+          <button onClick={() => { stopScanner(); onClose(); }} className="rounded-lg bg-zinc-800 px-3 py-1.5 text-xs font-semibold text-zinc-300 hover:bg-zinc-700">
             返回
           </button>
         </div>
@@ -187,7 +196,7 @@ export function CameraScanner({ onScanSuccess, onClose }: CameraScannerProps) {
         ) : (
           <>
             <div className="relative w-full max-w-md aspect-[4/3] overflow-hidden bg-zinc-800">
-              <div ref={containerRef} className="absolute inset-0 w-full h-full" />
+              <div id={scannerDivRef.current} className="absolute inset-0 w-full h-full" />
 
               {scanning && (
                 <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center">
@@ -216,7 +225,7 @@ export function CameraScanner({ onScanSuccess, onClose }: CameraScannerProps) {
       <div className="border-t border-zinc-800 bg-zinc-900 p-4">
         <div className="mx-auto flex max-w-sm items-center justify-between rounded-lg bg-zinc-800 px-3 py-2">
           <span className="text-[11px] text-zinc-400">引擎</span>
-          <span className="text-xs font-semibold text-emerald-400">Quagga2</span>
+          <span className="text-xs font-semibold text-emerald-400">ZXing (融合)</span>
         </div>
       </div>
 
@@ -225,11 +234,16 @@ export function CameraScanner({ onScanSuccess, onClose }: CameraScannerProps) {
           0%, 100% { top: 0%; }
           50% { top: 97%; }
         }
-        /* Quagga creates a video element */
-        #interactive.viewport video, #interactive.viewport canvas {
+        /* Override html5-qrcode styles to remove debug panel */
+        #${scannerDivRef.current} video {
+          object-fit: cover !important;
           width: 100% !important;
           height: 100% !important;
+        }
+        #${scannerDivRef.current} canvas {
           object-fit: cover !important;
+          width: 100% !important;
+          height: 100% !important;
         }
       `}</style>
     </div>
