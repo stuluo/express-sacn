@@ -97,7 +97,7 @@ export function CameraScanner({ onScanSuccess, onClose }: CameraScannerProps) {
 
       console.log("[Quagga2] init OK, starting...");
       quaggaReadyRef.current = true;
-      setEngine("Quagga2");
+      setEngine("Quagga2 v2");
       setScanning(true);
 
       Quagga.start();
@@ -206,7 +206,7 @@ export function CameraScanner({ onScanSuccess, onClose }: CameraScannerProps) {
           width: 100%;
           max-width: 640px;
         }
-        #interactive viewport > canvas,
+        #interactive.viewport > canvas,
         #interactive.viewport > video {
           width: 100%;
           height: auto;
