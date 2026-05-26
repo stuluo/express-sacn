@@ -1,11 +1,23 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { Camera, RefreshCw, AlertTriangle, Volume2, VolumeX } from "lucide-react";
-import Quagga from "@ericblade/quagga2";
+import { Html5Qrcode, Html5QrcodeSupportedFormats } from "html5-qrcode";
 
 interface CameraScannerProps {
   onScanSuccess: (barcode: string) => void;
   onClose: () => void;
 }
+
+const SCAN_FORMATS = [
+  Html5QrcodeSupportedFormats.CODE_128,
+  Html5QrcodeSupportedFormats.CODE_39,
+  Html5QrcodeSupportedFormats.EAN_13,
+  Html5QrcodeSupportedFormats.EAN_8,
+  Html5QrcodeSupportedFormats.UPC_A,
+  Html5QrcodeSupportedFormats.UPC_E,
+  Html5QrcodeSupportedFormats.QR_CODE,
+  Html5QrcodeSupportedFormats.ITF,
+  Html5QrcodeSupportedFormats.CODABAR,
+];
 
 export function CameraScanner({ onScanSuccess, onClose }: CameraScannerProps) {
   const [error, setError] = useState<string | null>(null);
@@ -15,10 +27,10 @@ export function CameraScanner({ onScanSuccess, onClose }: CameraScannerProps) {
   const [engine, setEngine] = useState<string>("");
 
   const soundRef = useRef(true);
-  const quaggaReadyRef = useRef(false);
+  const html5QrRef = useRef<Html5Qrcode | null>(null);
+  const scannerDivId = useRef(`scanner-${Date.now()}`).current;
   const facingModeRef = useRef(facingMode);
   const onDetectRef = useRef(onScanSuccess);
-  const initIdRef = useRef(0);
 
   useEffect(() => { soundRef.current = soundEnabled; }, [soundEnabled]);
   useEffect(() => { facingModeRef.current = facingMode; }, [facingMode]);
@@ -41,99 +53,67 @@ export function CameraScanner({ onScanSuccess, onClose }: CameraScannerProps) {
     } catch {}
   }, []);
 
-  const cleanup = useCallback(() => {
-    quaggaReadyRef.current = false;
-    try { Quagga.stop(); } catch {}
+  const cleanup = useCallback(async () => {
     setScanning(false);
+    if (html5QrRef.current) {
+      try { await html5QrRef.current.stop(); } catch {}
+      try { html5QrRef.current.clear(); } catch {}
+      html5QrRef.current = null;
+    }
   }, []);
 
   const startScanner = useCallback((mode: "environment" | "user") => {
     setError(null);
-    cleanup();
-
-    const currentInitId = ++initIdRef.current;
-
-    // Timeout: if init doesn't respond within 5s, show error
-    const timeout = setTimeout(() => {
-      if (currentInitId === initIdRef.current && !quaggaReadyRef.current && !scanning) {
-        setError("扫码引擎加载超时，请刷新页面重试。");
-        console.error("[Quagga2] init timeout");
+    cleanup().then(() => {
+      const el = document.getElementById(scannerDivId);
+      if (!el) {
+        setError("扫码容器不存在，请刷新页面。");
+        return;
       }
-    }, 5000);
+      // Clear any leftover content
+      el.innerHTML = "";
 
-    Quagga.init({
-      inputStream: {
-        name: "Live",
-        type: "LiveStream",
-        constraints: {
-          width: { min: 640, ideal: 1920, max: 1920 },
-          height: { min: 480, ideal: 1080, max: 1080 },
-          facingMode: mode,
+      const scanner = new Html5Qrcode(scannerDivId, {
+        verbose: false,
+        formatsToSupport: SCAN_FORMATS,
+      });
+      html5QrRef.current = scanner;
+
+      scanner.start(
+        { facingMode: mode },
+        {
+          fps: 15,
+          qrbox: { width: 300, height: 120 },
+          aspectRatio: 1.5,
+          disableFlipbookCallback: true,
         },
-      },
-      locator: {
-        halfSample: false,
-        patchSize: "large",
-      },
-      decoder: {
-        readers: [
-          "code_128_reader",
-          "ean_reader",
-          "ean_8_reader",
-          "code_39_reader",
-          "upc_reader",
-        ],
-      },
-      locate: true,
-      numOfWorkers: 0, // 0 = main thread, avoids Web Worker CSP issues on CF Pages
-      frequency: 3,
-    }, (err: any) => {
-      clearTimeout(timeout);
-      if (currentInitId !== initIdRef.current) return; // stale init
-
-      if (err) {
+        (decodedText: string) => {
+          const clean = decodedText.trim();
+          if (!clean) return;
+          playScanBeep();
+          cleanup();
+          onDetectRef.current(clean);
+        },
+        (errorMessage: string) => {
+          // Frame-by-frame no-detection logs — ignore silently
+          // Only log occasionally for debugging
+        }
+      ).then(() => {
+        setEngine(`html5-qrcode (ZXing ${SCAN_FORMATS.length}种)`);
+        setScanning(true);
+      }).catch((err: any) => {
         const msg = err?.message || err?.toString() || "";
         if (msg.toLowerCase().includes("notallowed") || msg.toLowerCase().includes("permission")) {
           setError("摄像头权限被拒绝，请在浏览器设置中允许访问。");
         } else if (msg.toLowerCase().includes("notfound") || msg.toLowerCase().includes("no cameras")) {
           setError("未找到可用摄像头设备。");
         } else {
-          setError(`Quagga2 启动失败: ${msg}`);
+          setError(`扫码启动失败: ${msg}`);
         }
-        console.error("[Quagga2] init error:", err);
-        return;
-      }
-
-      console.log("[Quagga2] init OK, starting...");
-      quaggaReadyRef.current = true;
-      setEngine("Quagga2 v2");
-      setScanning(true);
-
-      Quagga.start();
+        console.error("[html5-qrcode] start error:", err);
+      });
     });
-
-    // Listen for detected barcodes
-    const handler = (result: any) => {
-      if (currentInitId !== initIdRef.current) return; // stale
-      if (!quaggaReadyRef.current) return;
-
-      const code = result?.codeResult?.code;
-      if (!code) return;
-
-      const err = result?.codeResult?.error;
-      console.log("[Quagga2] candidate:", code, "error:", err);
-
-      // Accept result if error is undefined (no validation error)
-      if (err === undefined || err === null) {
-        quaggaReadyRef.current = false;
-        playScanBeep();
-        cleanup();
-        onDetectRef.current(code);
-      }
-    };
-
-    Quagga.onDetected(handler);
-  }, [cleanup, playScanBeep]);
+  }, [cleanup, playScanBeep, scannerDivId]);
 
   // Initial mount
   useEffect(() => {
@@ -191,7 +171,7 @@ export function CameraScanner({ onScanSuccess, onClose }: CameraScannerProps) {
           </div>
         ) : scanning ? (
           <div className="w-full max-w-md mx-auto px-4 text-center">
-            <div id="interactive" className="viewport mx-auto" />
+            <div id={scannerDivId} className="rounded-lg overflow-hidden mx-auto" />
             <p className="mt-4 text-[11px] text-zinc-400">
               将条形码水平对准摄像头，距离 15-25cm
             </p>
@@ -208,25 +188,6 @@ export function CameraScanner({ onScanSuccess, onClose }: CameraScannerProps) {
           <span className="text-xs font-semibold text-emerald-400">{engine || "加载中"}</span>
         </div>
       </div>
-
-      <style>{`
-        #interactive.viewport {
-          position: relative;
-          width: 100%;
-          max-width: 640px;
-        }
-        #interactive.viewport > canvas,
-        #interactive.viewport > video {
-          width: 100%;
-          height: auto;
-          border-radius: 8px;
-        }
-        #interactive.viewport canvas.drawingBuffer {
-          position: absolute;
-          top: 0;
-          left: 0;
-        }
-      `}</style>
     </div>
   );
 }
