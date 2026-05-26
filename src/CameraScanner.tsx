@@ -1,23 +1,11 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { Camera, RefreshCw, AlertTriangle, Volume2, VolumeX } from "lucide-react";
-import { Html5Qrcode, Html5QrcodeSupportedFormats } from "html5-qrcode";
+import { Html5Qrcode } from "html5-qrcode";
 
 interface CameraScannerProps {
   onScanSuccess: (barcode: string) => void;
   onClose: () => void;
 }
-
-const SCAN_FORMATS = [
-  Html5QrcodeSupportedFormats.CODE_128,
-  Html5QrcodeSupportedFormats.CODE_39,
-  Html5QrcodeSupportedFormats.EAN_13,
-  Html5QrcodeSupportedFormats.EAN_8,
-  Html5QrcodeSupportedFormats.UPC_A,
-  Html5QrcodeSupportedFormats.UPC_E,
-  Html5QrcodeSupportedFormats.QR_CODE,
-  Html5QrcodeSupportedFormats.ITF,
-  Html5QrcodeSupportedFormats.CODABAR,
-];
 
 export function CameraScanner({ onScanSuccess, onClose }: CameraScannerProps) {
   const [error, setError] = useState<string | null>(null);
@@ -28,12 +16,11 @@ export function CameraScanner({ onScanSuccess, onClose }: CameraScannerProps) {
 
   const soundRef = useRef(true);
   const html5QrRef = useRef<Html5Qrcode | null>(null);
-  const scannerDivId = useRef(`scanner-${Date.now()}`).current;
-  const facingModeRef = useRef(facingMode);
+  const containerRef = useRef<HTMLDivElement>(null);
   const onDetectRef = useRef(onScanSuccess);
+  const activeRef = useRef(false);
 
   useEffect(() => { soundRef.current = soundEnabled; }, [soundEnabled]);
-  useEffect(() => { facingModeRef.current = facingMode; }, [facingMode]);
   useEffect(() => { onDetectRef.current = onScanSuccess; }, [onScanSuccess]);
 
   const playScanBeep = useCallback(() => {
@@ -54,79 +41,140 @@ export function CameraScanner({ onScanSuccess, onClose }: CameraScannerProps) {
   }, []);
 
   const cleanup = useCallback(async () => {
-    setScanning(false);
+    activeRef.current = false;
     if (html5QrRef.current) {
-      try { await html5QrRef.current.stop(); } catch {}
+      // stop() can hang on some browsers if the scanner was never fully started
+      try {
+        await Promise.race([
+          html5QrRef.current.stop(),
+          new Promise((_, rej) => setTimeout(() => rej(new Error("stop timeout")), 2000)),
+        ]);
+      } catch {}
       try { html5QrRef.current.clear(); } catch {}
       html5QrRef.current = null;
     }
+    setScanning(false);
+    setEngine("");
   }, []);
 
-  const startScanner = useCallback((mode: "environment" | "user") => {
+  // We keep facingMode in a ref so the effect doesn't re-trigger
+  const facingModeRef = useRef(facingMode);
+  useEffect(() => { facingModeRef.current = facingMode; }, [facingMode]);
+
+  const initScanner = useCallback(async () => {
     setError(null);
-    cleanup().then(() => {
-      const el = document.getElementById(scannerDivId);
-      if (!el) {
-        setError("扫码容器不存在，请刷新页面。");
+    await cleanup();
+
+    const container = containerRef.current;
+    if (!container) {
+      setError("扫码容器不存在，请刷新页面。");
+      return;
+    }
+    container.innerHTML = "";
+
+    activeRef.current = true;
+
+    const scanner = new Html5Qrcode(container.id, { verbose: false });
+    html5QrRef.current = scanner;
+
+    const onDetect = onDetectRef.current;
+
+    const timeoutId = setTimeout(() => {
+      if (activeRef.current) {
+        activeRef.current = false;
+        cleanup();
+        setError("摄像头启动超时，请检查摄像头权限后刷新页面。");
+      }
+    }, 8000);
+
+    const onDetected = (decodedText: string) => {
+      const clean = decodedText.trim();
+      if (!clean) return;
+      clearTimeout(timeoutId);
+      activeRef.current = false;
+      playScanBeep();
+      cleanup();
+      onDetect(clean);
+    };
+
+    const config = {
+      fps: 10,
+      qrbox: { width: 300, height: 100 },
+      aspectRatio: 1.0,
+    };
+
+    // Strategy 1: enumerate cameras first (avoids facingMode issues on some browsers)
+    try {
+      const devices = await Html5Qrcode.getCameras();
+      if (devices && devices.length > 0) {
+        console.log("[html5-qrcode] found cameras:", devices.map(d => d.label));
+        const mode = facingModeRef.current;
+        let deviceId: string;
+        if (mode === "environment") {
+          const back = devices.find(d =>
+            /back|rear|环境|后|wide|camera/i.test(d.label)
+          );
+          deviceId = back ? back.id : devices[0].id;
+        } else {
+          const front = devices.find(d =>
+            /front|user|前|self/i.test(d.label)
+          );
+          deviceId = front ? front.id : devices[devices.length - 1].id;
+        }
+        console.log("[html5-qrcode] using device:", devices.find(d => d.id === deviceId)?.label);
+
+        if (activeRef.current) {
+          await scanner.start(deviceId, config, onDetected, () => {});
+          clearTimeout(timeoutId);
+          activeRef.current = false;
+          setEngine("html5-qrcode");
+          setScanning(true);
+          return;
+        }
+      }
+    } catch (e) {
+      console.warn("[html5-qrcode] getCameras failed, trying facingMode:", e);
+    }
+
+    // Strategy 2: fallback to facingMode
+    try {
+      if (activeRef.current) {
+        await scanner.start({ facingMode: facingModeRef.current }, config, onDetected, () => {});
+        clearTimeout(timeoutId);
+        activeRef.current = false;
+        setEngine("html5-qrcode");
+        setScanning(true);
         return;
       }
-      // Clear any leftover content
-      el.innerHTML = "";
+    } catch (err: any) {
+      if (!activeRef.current) return; // cancelled
+      const msg = err?.message || err?.toString() || "";
+      if (msg.toLowerCase().includes("notallowed") || msg.toLowerCase().includes("permission")) {
+        setError("摄像头权限被拒绝，请在浏览器设置中允许访问。");
+      } else if (msg.toLowerCase().includes("notfound") || msg.toLowerCase().includes("no cameras")) {
+        setError("未找到可用摄像头设备。");
+      } else if (msg.toLowerCase().includes("insecure")) {
+        setError("当前页面不是 HTTPS，摄像头需要 HTTPS 环境。");
+      } else {
+        setError(`扫码启动失败: ${msg}`);
+      }
+      console.error("[html5-qrcode] start error:", err);
+    }
+  }, [cleanup, playScanBeep]);
 
-      const scanner = new Html5Qrcode(scannerDivId, {
-        verbose: false,
-        formatsToSupport: SCAN_FORMATS,
-      });
-      html5QrRef.current = scanner;
-
-      scanner.start(
-        { facingMode: mode },
-        {
-          fps: 15,
-          qrbox: { width: 300, height: 120 },
-          aspectRatio: 1.5,
-          disableFlipbookCallback: true,
-        },
-        (decodedText: string) => {
-          const clean = decodedText.trim();
-          if (!clean) return;
-          playScanBeep();
-          cleanup();
-          onDetectRef.current(clean);
-        },
-        (errorMessage: string) => {
-          // Frame-by-frame no-detection logs — ignore silently
-          // Only log occasionally for debugging
-        }
-      ).then(() => {
-        setEngine(`html5-qrcode (ZXing ${SCAN_FORMATS.length}种)`);
-        setScanning(true);
-      }).catch((err: any) => {
-        const msg = err?.message || err?.toString() || "";
-        if (msg.toLowerCase().includes("notallowed") || msg.toLowerCase().includes("permission")) {
-          setError("摄像头权限被拒绝，请在浏览器设置中允许访问。");
-        } else if (msg.toLowerCase().includes("notfound") || msg.toLowerCase().includes("no cameras")) {
-          setError("未找到可用摄像头设备。");
-        } else {
-          setError(`扫码启动失败: ${msg}`);
-        }
-        console.error("[html5-qrcode] start error:", err);
-      });
-    });
-  }, [cleanup, playScanBeep, scannerDivId]);
+  const switchCamera = useCallback(async () => {
+    const newMode = facingMode === "environment" ? "user" : "environment";
+    setFacingMode(newMode);
+    await cleanup();
+    setTimeout(() => initScanner(), 200);
+  }, [facingMode, cleanup, initScanner]);
 
   // Initial mount
   useEffect(() => {
-    startScanner(facingMode);
+    initScanner();
     return () => { cleanup(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  const switchCamera = useCallback(() => {
-    const newMode = facingMode === "environment" ? "user" : "environment";
-    setFacingMode(newMode);
-    startScanner(newMode);
-  }, [facingMode, startScanner]);
 
   return (
     <div className="fixed inset-0 z-50 flex flex-col bg-zinc-950 text-white">
@@ -171,7 +219,7 @@ export function CameraScanner({ onScanSuccess, onClose }: CameraScannerProps) {
           </div>
         ) : scanning ? (
           <div className="w-full max-w-md mx-auto px-4 text-center">
-            <div id={scannerDivId} className="rounded-lg overflow-hidden mx-auto" />
+            <div ref={containerRef} id="qr-scanner" className="rounded-lg overflow-hidden mx-auto" />
             <p className="mt-4 text-[11px] text-zinc-400">
               将条形码水平对准摄像头，距离 15-25cm
             </p>
