@@ -53,6 +53,14 @@ export function CameraScanner({ onScanSuccess, onClose }: CameraScannerProps) {
 
     const currentInitId = ++initIdRef.current;
 
+    // Timeout: if init doesn't respond within 5s, show error
+    const timeout = setTimeout(() => {
+      if (currentInitId === initIdRef.current && !quaggaReadyRef.current && !scanning) {
+        setError("扫码引擎加载超时，请刷新页面重试。");
+        console.error("[Quagga2] init timeout");
+      }
+    }, 5000);
+
     Quagga.init({
       inputStream: {
         name: "Live",
@@ -77,9 +85,10 @@ export function CameraScanner({ onScanSuccess, onClose }: CameraScannerProps) {
         ],
       },
       locate: true,
-      numOfWorkers: 1,
+      numOfWorkers: 0, // 0 = main thread, avoids Web Worker CSP issues on CF Pages
       frequency: 3,
     }, (err: any) => {
+      clearTimeout(timeout);
       if (currentInitId !== initIdRef.current) return; // stale init
 
       if (err) {
