@@ -219,13 +219,16 @@ export function CameraScanner({ onScanSuccess, onClose }: CameraScannerProps) {
           </div>
         ) : scanning ? (
           <div className="w-full max-w-md mx-auto px-4 text-center">
-            <div ref={containerRef} id="qr-scanner" className="rounded-lg overflow-hidden mx-auto" />
+            <div id="qr-scanner" ref={containerRef} className="rounded-lg overflow-hidden mx-auto" />
             <p className="mt-4 text-[11px] text-zinc-400">
               将条形码水平对准摄像头，距离 15-25cm
             </p>
           </div>
         ) : (
-          <div className="text-zinc-400 text-sm">启动中...</div>
+          <>
+            <div id="qr-scanner" ref={containerRef} className="hidden" />
+            <div className="text-zinc-400 text-sm">启动中...</div>
+          </>
         )}
       </div>
 
