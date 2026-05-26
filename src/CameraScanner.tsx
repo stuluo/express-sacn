@@ -81,6 +81,7 @@ export function CameraScanner({ onScanSuccess, onClose }: CameraScannerProps) {
 
   // --- BarcodeDetector scan loop ---
   const lastDetectTimeRef = useRef(0);
+  const frameCountRef = useRef(0);
 
   const bdScanLoop = useCallback(() => {
     const video = videoRef.current;
@@ -95,19 +96,23 @@ export function CameraScanner({ onScanSuccess, onClose }: CameraScannerProps) {
     }
 
     const now = Date.now();
-    if (now - lastDetectTimeRef.current < 100) {
+    if (now - lastDetectTimeRef.current < 200) { // 降低到 5fps，给自动对焦更多时间
       rafRef.current = requestAnimationFrame(bdScanLoop);
       return;
     }
     lastDetectTimeRef.current = now;
+    frameCountRef.current++;
 
     detector.detect(video).then((barcodes) => {
-      if (barcodes.length > 0) {
+      if (frameCountRef.current <= 10 || frameCountRef.current % 30 === 0) {
+        console.log(`[BarcodeDetector] frame #${frameCountRef.current}, barcodes found: ${barcodes.length}`);
+      }
+      if (barcodes.length > 0 && !detectedRef.current) {
+        console.log("[BarcodeDetector] detected:", barcodes[0].rawValue);
         onDetect(barcodes[0].rawValue);
-        return;
       }
     }).catch((err) => {
-      console.warn("[BarcodeDetector] detect error:", err);
+      console.error("[BarcodeDetector] detect error:", err);
     }).finally(() => {
       if (!detectedRef.current) {
         rafRef.current = requestAnimationFrame(bdScanLoop);
@@ -230,11 +235,9 @@ export function CameraScanner({ onScanSuccess, onClose }: CameraScannerProps) {
 
         Quagga.onDetected((result: any) => {
           if (result?.codeResult?.code) {
-            const confidence = result.codeResult?.result?.code?.[2] ?? 0;
-            // Accept any confidence >= 0.1 to be lenient
-            if (confidence >= 0.1) {
-              onDetect(result.codeResult.code);
-            }
+            const code = result.codeResult.code;
+            console.log("[Quagga2] detected:", code, result.codeResult);
+            onDetect(code);
           }
         });
       } catch (err: any) {
@@ -247,11 +250,10 @@ export function CameraScanner({ onScanSuccess, onClose }: CameraScannerProps) {
     setError(null);
     await stopAll();
 
-    // Try BarcodeDetector first (fast, native), fall back to Quagga2
-    const bdOk = await startBdScanner(mode);
-    if (bdOk) return;
+    // Use Quagga2 directly — it has dedicated 1D barcode detection with image preprocessing.
+    // BarcodeDetector is too unreliable for shipping label barcodes despite claiming support.
     startQuagga(mode);
-  }, [startBdScanner, startQuagga, stopAll]);
+  }, [startQuagga, stopAll]);
 
   const switchCamera = useCallback(() => {
     const newMode = facingMode === "environment" ? "user" : "environment";
