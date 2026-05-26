@@ -33,8 +33,6 @@ export function CameraScanner({ onScanSuccess, onClose }: CameraScannerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const rafRef = useRef<number>(0);
-  const canvasRef = useRef<OffscreenCanvas | HTMLCanvasElement | null>(null);
-  const ctxRef = useRef<CanvasRenderingContext2D | null>(null);
   const detectedRef = useRef(false);
   const detectorRef = useRef<BarcodeDetector | null>(null);
   const zxingRef = useRef<Html5Qrcode | null>(null);
@@ -78,11 +76,12 @@ export function CameraScanner({ onScanSuccess, onClose }: CameraScannerProps) {
   };
 
   // --- BarcodeDetector scan loop ---
+  const lastDetectTimeRef = useRef(0);
+
   const bdScanLoop = () => {
     const video = videoRef.current;
     const detector = detectorRef.current;
-    const canvas = canvasRef.current;
-    if (!video || !detector || !canvas) {
+    if (!video || !detector) {
       rafRef.current = requestAnimationFrame(bdScanLoop);
       return;
     }
@@ -91,18 +90,22 @@ export function CameraScanner({ onScanSuccess, onClose }: CameraScannerProps) {
       return;
     }
 
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    if (ctxRef.current) {
-      ctxRef.current.drawImage(video, 0, 0, canvas.width, canvas.height);
+    // Throttle to ~10fps to avoid overwhelming the detector
+    const now = Date.now();
+    if (now - lastDetectTimeRef.current < 100) {
+      rafRef.current = requestAnimationFrame(bdScanLoop);
+      return;
     }
+    lastDetectTimeRef.current = now;
 
-    detector.detect(canvas as HTMLCanvasElement).then((barcodes) => {
+    detector.detect(video).then((barcodes) => {
       if (barcodes.length > 0) {
         onDetect(barcodes[0].rawValue);
         return;
       }
-    }).catch(() => {}).finally(() => {
+    }).catch((err) => {
+      console.warn("[BarcodeDetector] detect error:", err);
+    }).finally(() => {
       if (!detectedRef.current) {
         rafRef.current = requestAnimationFrame(bdScanLoop);
       }
@@ -123,11 +126,6 @@ export function CameraScanner({ onScanSuccess, onClose }: CameraScannerProps) {
 
       const detector = new BarcodeDetector({ formats: ourFormats });
       detectorRef.current = detector;
-
-      // Create canvas for frame capture
-      const canvas = document.createElement("canvas");
-      canvasRef.current = canvas;
-      ctxRef.current = canvas.getContext("2d", { willReadFrequently: true });
 
       const stream = await navigator.mediaDevices.getUserMedia({
         video: { facingMode: mode, width: { ideal: 1280 }, height: { ideal: 720 } },
